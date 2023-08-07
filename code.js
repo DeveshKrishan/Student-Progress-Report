@@ -23,15 +23,19 @@ function main() {
     const updateCounter = (counter) =>  completionProgress.setValue(`${Math.round((counter / 8) * 100 )}%`); // Counter to update progres of script in "B3"
 
     let studentData = updateCourseNameAndNumberOfStudents(courseNum, sheet, headers); updateCounter(counter++);
-    let arrayOfModuleData = updateModuleAndModuleItems(courseNum, headers, sheet); updateCounter(counter++);
+
+    let arrayOfReq = updateModuleAndModuleItems(courseNum, headers, sheet); updateCounter(counter++);
+    let arrayOfModuleData = arrayOfReq[0];
+    const checkReq = arrayOfReq[1];
+
     let rowAfterStudents = updateStudentNames(sheet, studentData) + 1; updateCounter(counter++); // Is the row where "Completion Statistics" is written 
     setUpCompletionStats(rowAfterStudents, sheet); updateCounter(counter++);
     sheet.getRange(rowAfterStudents + 1, 3, 1, 1).setValue(studentData.length);
-    const completionArray = writeModuleCompletionInfo(arrayOfModuleData, studentData, sheet, courseNum); updateCounter(counter++);
+    const completionArray = writeModuleCompletionInfo(arrayOfModuleData, studentData, sheet, courseNum, checkReq); updateCounter(counter++);
     const completionRange = completionArray[1];
     const completionData = completionArray[0];
     const completionCol = colorCompletionBackgrounds(completionData, completionRange, sheet); updateCounter(counter++);
-    updateCompletionPercentages(completionData, sheet, completionCol, rowAfterStudents); updateCounter(counter++);
+    updateCompletionPercentages(completionData, sheet, completionCol, rowAfterStudents, studentData.length); updateCounter(counter++);
     addPieChartsToSheet(sheet, rowAfterStudents); updateCounter(counter++);
     addProgressUpdatedTime(sheet); updateCounter(counter++);
 
@@ -128,6 +132,7 @@ function updateCourseNameAndNumberOfStudents(courseNum, sheet, headers){
 
 }
 
+
 function updateModuleAndModuleItems(courseNum, headers, sheet){
     // Grabs all the modules and all the data for all the module items and returns them
 
@@ -138,21 +143,30 @@ function updateModuleAndModuleItems(courseNum, headers, sheet){
       moduleData = JSON.parse(UrlFetchApp.fetch(listModulesURL, {headers:headers}).getContentText());
     }
     catch(error){
-      console.log(`Error occurred with fetching module data: ${error}`);
+      console.error(`Error occurred with fetching module data: ${error}`);
     }
 
     const moduleItemData = [];
     let data = [[], []]
-    
+    const checkRequirements = new Map(); // Checks if each module has requirements enabled
+
     // Grab all the data for each module and module item such as name and id. 
     // Takes a lengthy amount of time but only solution was calling requests to each module and iterating over a list Module items for each module.
     // https://canvas.instructure.com/doc/api/modules.html#method.context_module_items_api.index
     try{
       for (module of moduleData){
         const listModuleItemsURL = `https://canvas.eee.uci.edu/api/v1/courses/${courseNum}/modules/${module.id}/items` + "?per_page=100"; 
+
         let moduleItemsData = JSON.parse(UrlFetchApp.fetch(listModuleItemsURL, {headers:headers}).getContentText());
+
         if (moduleItemsData.length == 0){ continue;} /// If module is empty, skip over it and go to next iteration
         else{
+          if (moduleItemsData[0].completion_requirement == undefined){ // Check if the first module item has requirements. 
+            checkRequirements.set(moduleItemsData[0].module_id, false)
+          }
+          else{
+            checkRequirements.set(moduleItemsData[0].module_id, true)
+          }
           for (moduleItem of moduleItemsData){
             data[0].push(module.name);
             data[1].push(moduleItem.title);
@@ -183,7 +197,7 @@ function updateModuleAndModuleItems(courseNum, headers, sheet){
       console.error(`Error has occurred with writing to clearData sheet. Error is: ${err}`)
     }
 
-    return moduleItemData;
+    return [moduleItemData, checkRequirements];
 }
 
 function updateStudentNames(sheet, studentData){
@@ -239,7 +253,7 @@ function updateStudentNames(sheet, studentData){
     }
 }
 
-function writeModuleCompletionInfo(arrayOfModuleData, studentData, sheet, courseNum){
+function writeModuleCompletionInfo(arrayOfModuleData, studentData, sheet, courseNum, checkReq){
     // This part takes the longest runtime for the entire script. 
     // For each student, find each module and check if every module item in a module is completed by that student. 
     // Runtime = Number of students * Number of modules * Number of module items in each module
@@ -274,22 +288,25 @@ function writeModuleCompletionInfo(arrayOfModuleData, studentData, sheet, course
       const tempStudentStorage = [];
       for (const [moduleId, listOfModuleItems] of moduleMap) {
         let studentData;
-        try{
-          // API call to check if student completed every module. 
-          let moduleCompletionURL = `https://canvas.eee.uci.edu/api/v1/courses/${courseNum}/modules/${moduleId}`; 
-          const query = {
-            per_page: 100,
-            student_id: student.id
-          };
-          const endpoint = moduleCompletionURL.addQuery(query);
-          studentData = JSON.parse(UrlFetchApp.fetch(endpoint, {headers:headers}).getContentText());
-        }
-        catch (e){
-          console.error(`Error occurred while fetching data to check if module was completed: ${e}`);
+        if (checkReq.get(moduleId)){ // If the module has requirements, call the API
+              try{
+                // API call to check if student completed every module. 
+                let moduleCompletionURL = `https://canvas.eee.uci.edu/api/v1/courses/${courseNum}/modules/${moduleId}`; 
+                const query = {
+                  per_page: 100,
+                  student_id: student.id
+                };
+                const endpoint = moduleCompletionURL.addQuery(query);
+                studentData = JSON.parse(UrlFetchApp.fetch(endpoint, {headers:headers}).getContentText());
+              }
+              catch (e){
+                console.error(`Error occurred while fetching data to check if module was completed: ${e}`);
+              }
         }
         
+        
         // If module is completed, skip going through each module item to save time and just write completed for all it's module items.
-        if (studentData.state == "completed"){
+        if (checkReq.get(moduleId) == false || studentData.state == "completed" ){ // If module is completed by student or doesn't have requirements, set it as complete for each student. 
           // Multiply "completed" strings by number of module items
           for (let i = 0; i < listOfModuleItems.length; i++){
             tempStudentStorage.push("completed");
@@ -312,8 +329,14 @@ function writeModuleCompletionInfo(arrayOfModuleData, studentData, sheet, course
             catch(e){
               console.error(`Error has occurred while checking a module item given a student id: ${e}`);
             }
-
-            let ifCompleted = moduleCompleteInfo.completion_requirement.completed;
+            ifCompleted = moduleCompleteInfo.completion_requirement.completed;
+            // let ifCompleted;
+            // if (moduleCompleteInfo.completion_requirement == undefined){
+            //   ifCompleted == "true"
+            // }
+            // else{
+            //   ifCompleted = moduleCompleteInfo.completion_requirement.completed;
+            // }
             if (ifCompleted == "true"){ // if module item complete, add "completed" else grab the state ("unlocked", "started", ...).
               tempStudentStorage.push("completed")
             }
@@ -381,7 +404,7 @@ function colorCompletionBackgrounds(completionData, completionRange, sheet){
     return completionCol;
 }
 
-function updateCompletionPercentages(completionData, sheet, completionCol, rowAfterStudents){
+function updateCompletionPercentages(completionData, sheet, completionCol, rowAfterStudents, numOfStudents){
     // Update completion percentages
 
     // Grab completion for each module
@@ -455,13 +478,13 @@ function updateCompletionPercentages(completionData, sheet, completionCol, rowAf
     }
 
     const completionPercentageTrack = completionTrack.map((element, index) => {
-      return [`${Math.round((element[0] / completionTrack.length) * 100 )}%`];
+      return [`${Math.round((element[0] / numOfStudents) * 100 )}%`]; // Divides amount completed by number of students.
     });
 
     const completionMergedTrack = completionTrack.map((element, index) => {
       return [element[0], completionPercentageTrack[index][0]];
     });
-    
+
     try{
       sheet.getRange(rowAfterStudents + 4, 3, 11, 2).setValues(completionMergedTrack);
     }
